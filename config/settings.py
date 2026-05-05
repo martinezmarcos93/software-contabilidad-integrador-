@@ -15,9 +15,12 @@ DEFAULTS = {
     "meses_inactividad":          12,
     "carpetas_cliente_default":   ["Documentos", "Constancias y credenciales", "Facturacion"],
     "ai_modo":                    "local",           # "local" | "cloud"
-    "ai_modelo_local":            "",                # vacío = autodetectar primer modelo disponible
+    "ai_ollama_url":              "http://localhost:11434",
+    "ai_modelo_local":            "mistral:7b",
+    "ai_proveedor":               "Gemini Flash",    # "Gemini Flash" | "Groq"
     "ai_modelo_cloud":            "gemini-2.0-flash",
     "ai_cloud_base_url":          "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "ai_api_key":                 "",
 }
 
 
