@@ -17,6 +17,7 @@ from PyQt6.QtCore import Qt, QDate, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 import urllib.request
 import json
+from datetime import datetime
 
 from db.connection import conn_ctx
 
@@ -456,6 +457,11 @@ class DialogActualizacion(QDialog):
                     "UPDATE clientes_detalle SET honorarios=? WHERE tipo=? AND cliente_id=?",
                     (round(nuevo, 2), c["tipo"], c["cliente_id"])
                 )
+            conn.execute(
+                "INSERT INTO historial_actualizaciones (fecha, porcentaje, clientes_afect, notas) "
+                "VALUES (?, ?, ?, ?)",
+                (datetime.now().strftime("%d/%m/%Y %H:%M"), pct, len(selec), "")
+            )
         QMessageBox.information(self, "Listo", f"{len(selec)} honorario(s) actualizado(s).")
         self.accept()
 
@@ -790,9 +796,27 @@ class TabActualizacion(QWidget):
         lay.addWidget(btn_abrir)
         lay.addStretch()
 
+        self._cargar_historial()
+
+    def _cargar_historial(self):
+        self.tabla_hist.setRowCount(0)
+        with conn_ctx() as conn:
+            rows = conn.execute(
+                "SELECT fecha, porcentaje, clientes_afect, notas "
+                "FROM historial_actualizaciones ORDER BY id DESC LIMIT 50"
+            ).fetchall()
+        for r in rows:
+            ri = self.tabla_hist.rowCount()
+            self.tabla_hist.insertRow(ri)
+            self.tabla_hist.setItem(ri, 0, _item(r["fecha"]))
+            self.tabla_hist.setItem(ri, 1, _item(f"{r['porcentaje']:.4f}%", _YELLOW))
+            self.tabla_hist.setItem(ri, 2, _item(str(r["clientes_afect"])))
+            self.tabla_hist.setItem(ri, 3, _item(r["notas"] or ""))
+
     def _abrir_dialogo(self):
         dlg = DialogActualizacion(self)
         dlg.exec()
+        self._cargar_historial()
 
 
 # ══════════════════════════════════════════════════════════════

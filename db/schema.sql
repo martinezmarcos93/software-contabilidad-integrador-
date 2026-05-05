@@ -122,3 +122,12 @@ CREATE TABLE IF NOT EXISTS historial_lsd (
     path_txt         TEXT,
     fecha_generacion TEXT
 );
+
+-- Honorarios: historial de actualizaciones por índice
+CREATE TABLE IF NOT EXISTS historial_actualizaciones (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    fecha           TEXT NOT NULL,
+    porcentaje      REAL NOT NULL,
+    clientes_afect  INTEGER NOT NULL,
+    notas           TEXT DEFAULT ''
+);

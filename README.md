@@ -92,7 +92,7 @@ SOFTWARE_CONTABLE_API_KEY=tu_api_key_aqui
 ## Roadmap
 
 - [x] **Fase 1** — Esqueleto: login, ventana principal con sidebar, DB unificada
-- [ ] **Fase 2** — Módulos de gestión: clientes, honorarios, liquidador, calculadoras
+- [x] **Fase 2** — Módulos de gestión: clientes, honorarios, liquidador, calculadoras
 - [ ] **Fase 3** — Gestión de archivos y carpetas de clientes
 - [ ] **Fase 4** — Panel de Asistente IA (Ollama local + cloud)
 
