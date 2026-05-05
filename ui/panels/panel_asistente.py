@@ -115,6 +115,42 @@ def _schema_resumido() -> str:
     return "\n".join(lineas)
 
 
+def _fmt_error(e: Exception) -> str:
+    """Convierte excepciones de red en mensajes claros para el usuario."""
+    if isinstance(e, urllib.error.HTTPError):
+        if e.code == 429:
+            return (
+                "Límite de requests alcanzado (429 Too Many Requests).\n"
+                "Esperá unos minutos antes de volver a intentar.\n"
+                "Si usás el free tier de Gemini, el límite es 15 requests/minuto."
+            )
+        if e.code == 401:
+            return (
+                "API key inválida o sin autorización (401).\n"
+                "Revisá la key en la pestaña Configuración IA."
+            )
+        if e.code == 403:
+            return "Acceso denegado (403). Verificá que la API key tenga los permisos necesarios."
+        return f"Error del servidor de IA ({e.code}): {e.reason}"
+
+    if isinstance(e, urllib.error.URLError):
+        reason = e.reason
+        # WinError 10061 (Windows) / errno 111 (Linux) = conexión rechazada
+        errno_ = getattr(reason, "errno", None)
+        if errno_ in (10061, 111):
+            return (
+                "Ollama no está corriendo (conexión rechazada).\n"
+                "Iniciá Ollama antes de usar el chat: ejecutá 'ollama serve' en una terminal,\n"
+                "o abrí la aplicación Ollama desde el menú de inicio."
+            )
+        # getaddrinfo failed = URL no resoluble
+        if errno_ in (11001, -2, -3):
+            return "No se pudo resolver la URL del servidor. Revisá la dirección en Configuración IA."
+        return f"Error de conexión: {reason}"
+
+    return str(e)
+
+
 def _btn(text: str, color: str = _ACCENT) -> QPushButton:
     b = QPushButton(text)
     b.setStyleSheet(
@@ -155,10 +191,8 @@ class WorkerChat(QThread):
                 resp = self._llamar(msgs2)
 
             self.respuesta.emit(resp)
-        except urllib.error.URLError as e:
-            self.error.emit(f"No se pudo conectar al servidor de IA.\n{e.reason}")
         except Exception as e:
-            self.error.emit(str(e))
+            self.error.emit(_fmt_error(e))
 
     # ── HTTP ─────────────────────────────────────────────────
 
@@ -450,12 +484,8 @@ class _WorkerTest(QThread):
                 with urllib.request.urlopen(req, timeout=15) as r:
                     json.loads(r.read())
                 self.resultado.emit(True, f"Conexión OK con {cfg.get('ai_proveedor','')}")
-        except urllib.error.HTTPError as e:
-            self.resultado.emit(False, f"HTTP {e.code}: {e.reason}")
-        except urllib.error.URLError as e:
-            self.resultado.emit(False, f"Sin conexión: {e.reason}")
         except Exception as e:
-            self.resultado.emit(False, str(e))
+            self.resultado.emit(False, _fmt_error(e))
 
 
 # ══════════════════════════════════════════════════════════════
