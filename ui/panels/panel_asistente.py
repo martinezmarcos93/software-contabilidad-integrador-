@@ -6,7 +6,11 @@ Chat en lenguaje natural · Ollama local · Gemini Flash · Groq
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
+import subprocess
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -245,6 +249,84 @@ class WorkerChat(QThread):
             return json.dumps([dict(r) for r in rows], ensure_ascii=False, default=str)
         except Exception as e:
             return f"Error al ejecutar SQL: {e}"
+
+
+# ══════════════════════════════════════════════════════════════
+#  ARRANQUE AUTOMÁTICO DE OLLAMA
+# ══════════════════════════════════════════════════════════════
+
+_OLLAMA_PATHS = [
+    Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe",
+    Path("C:/Program Files/Ollama/ollama.exe"),
+    Path("C:/Program Files (x86)/Ollama/ollama.exe"),
+]
+
+
+def _encontrar_ollama() -> str | None:
+    en_path = shutil.which("ollama")
+    if en_path:
+        return en_path
+    for p in _OLLAMA_PATHS:
+        if p.exists():
+            return str(p)
+    return None
+
+
+class WorkerArranqueOllama(QThread):
+    listo  = pyqtSignal()
+    fallo  = pyqtSignal(str)
+    estado = pyqtSignal(str)
+
+    def __init__(self, ollama_url: str):
+        super().__init__()
+        self._ping_url = ollama_url.rstrip("/") + "/api/tags"
+
+    def run(self):
+        # Si ya está corriendo, listo
+        if self._ping():
+            self.listo.emit()
+            return
+
+        exe = _encontrar_ollama()
+        if not exe:
+            self.fallo.emit(
+                "Ollama no está instalado.\n"
+                "Descargalo desde ollama.com e instalalo, luego reiniciá el software."
+            )
+            return
+
+        self.estado.emit("Iniciando Ollama...")
+        try:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.Popen(
+                [exe, "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags,
+            )
+        except Exception as e:
+            self.fallo.emit(f"No se pudo iniciar Ollama: {e}")
+            return
+
+        for i in range(30):
+            time.sleep(1)
+            self.estado.emit(f"Esperando Ollama... {i + 1}s")
+            if self._ping():
+                self.listo.emit()
+                return
+
+        self.fallo.emit(
+            "Ollama tardó demasiado en iniciar (>30s).\n"
+            "Intentá iniciarlo manualmente con 'ollama serve'."
+        )
+
+    def _ping(self) -> bool:
+        try:
+            req = urllib.request.Request(self._ping_url)
+            with urllib.request.urlopen(req, timeout=2):
+                return True
+        except Exception:
+            return False
 
 
 # ══════════════════════════════════════════════════════════════
@@ -530,9 +612,10 @@ class TabChat(QWidget):
     def __init__(self, tab_config: TabConfigIA):
         super().__init__()
         self.setStyleSheet(STYLE_BASE)
-        self._tab_config  = tab_config
-        self._historial:  list[dict] = []
-        self._worker:     WorkerChat | None = None
+        self._tab_config      = tab_config
+        self._historial:      list[dict] = []
+        self._worker:         WorkerChat | None = None
+        self._arranque_worker: WorkerArranqueOllama | None = None
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 12, 16, 12)
@@ -574,7 +657,41 @@ class TabChat(QWidget):
         nota.setStyleSheet(f"color: {_TEXT_DIM}; font-size: 11px;")
         lay.addWidget(nota)
 
-        self._actualizar_estado()
+        self._auto_arrancar_ollama()
+
+    def _auto_arrancar_ollama(self):
+        cfg = self._tab_config.get_config()
+        if cfg.get("ai_modo", "local") != "local":
+            self._actualizar_estado()
+            return
+        self._set_input(False)
+        self.lbl_estado.setText("🟡  Verificando Ollama...")
+        self.lbl_estado.setStyleSheet(f"color: {_YELLOW}; font-size: 12px;")
+        url = cfg.get("ai_ollama_url", "http://localhost:11434")
+        self._arranque_worker = WorkerArranqueOllama(url)
+        self._arranque_worker.estado.connect(
+            lambda msg: self.lbl_estado.setText(f"🟡  {msg}")
+        )
+        self._arranque_worker.listo.connect(self._on_ollama_listo)
+        self._arranque_worker.fallo.connect(self._on_ollama_fallo)
+        self._arranque_worker.start()
+
+    def _on_ollama_listo(self):
+        self._set_input(True)
+        cfg    = self._tab_config.get_config()
+        modelo = cfg.get("ai_modelo_local", "—")
+        self.lbl_estado.setText(f"🟢  Ollama listo — {modelo}")
+        self.lbl_estado.setStyleSheet(f"color: {_GREEN}; font-size: 12px;")
+
+    def _on_ollama_fallo(self, msg: str):
+        self._set_input(True)
+        self._agregar_html(_HTML_ERROR.format(texto=_escapar(msg)))
+        self.lbl_estado.setText("🔴  Ollama no disponible")
+        self.lbl_estado.setStyleSheet(f"color: {_RED}; font-size: 12px;")
+
+    def _set_input(self, habilitado: bool):
+        self.inp.setEnabled(habilitado)
+        self.btn_enviar.setEnabled(habilitado)
 
     def _actualizar_estado(self):
         cfg  = self._tab_config.get_config()
@@ -614,15 +731,13 @@ class TabChat(QWidget):
         self._worker.error.connect(self._on_error)
         self._worker.start()
 
-        self.inp.setEnabled(False)
-        self.btn_enviar.setEnabled(False)
+        self._set_input(False)
         self.lbl_estado.setText("🟡  Pensando...")
 
     def _on_respuesta(self, texto: str):
         self._agregar_html(_HTML_ASIST.format(texto=_escapar(texto)))
         self._historial.append({"role": "assistant", "content": texto})
-        self.inp.setEnabled(True)
-        self.btn_enviar.setEnabled(True)
+        self._set_input(True)
         self._actualizar_estado()
 
     def _on_sql(self, sql: str, resultado: str):
@@ -630,9 +745,8 @@ class TabChat(QWidget):
 
     def _on_error(self, msg: str):
         self._agregar_html(_HTML_ERROR.format(texto=_escapar(msg)))
-        self.inp.setEnabled(True)
-        self.btn_enviar.setEnabled(True)
-        self.lbl_estado.setText(f"🔴  Error de conexión")
+        self._set_input(True)
+        self.lbl_estado.setText("🔴  Error de conexión")
         self.lbl_estado.setStyleSheet(f"color: {_RED}; font-size: 12px;")
 
     def _agregar_html(self, html: str):
@@ -684,8 +798,8 @@ class PanelAsistente(QWidget):
         tabs.addTab(chat_tab,   "💬  Chat")
         tabs.addTab(config_tab, "⚙️  Configuración IA")
 
-        # Cuando el usuario cambia a la tab de chat, actualiza el estado
+        # Al volver al chat re-verifica Ollama (por si cambió la config a local)
         tabs.currentChanged.connect(
-            lambda i: chat_tab._actualizar_estado() if i == 0 else None
+            lambda i: chat_tab._auto_arrancar_ollama() if i == 0 else None
         )
         lay.addWidget(tabs)
