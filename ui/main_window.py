@@ -122,6 +122,6 @@ class VentanaPrincipal(QMainWindow):
     def _centrar(self):
         geo = QGuiApplication.primaryScreen().availableGeometry()
         self.move(
-            geo.center().x() - self.width() // 2,
-            geo.center().y() - self.height() // 2,
+            geo.center().x() - 1150 // 2,
+            geo.center().y() - 700 // 2,
         )

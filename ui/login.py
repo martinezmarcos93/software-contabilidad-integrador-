@@ -205,7 +205,7 @@ def lanzar_app():
             _ventanas.clear()
             w = VentanaPrincipal(nombre_estudio)
             _ventanas.append(w)
-            w.show()
+            w.showMaximized()
 
         v = VentanaLogin(on_success=abrir_principal)
         _ventanas.append(v)

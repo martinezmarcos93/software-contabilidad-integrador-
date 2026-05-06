@@ -19,7 +19,8 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QPushButton, QLineEdit, QLabel, QTextBrowser,
     QMessageBox, QGroupBox, QRadioButton, QButtonGroup,
-    QComboBox, QFrame, QSizePolicy,
+    QComboBox, QFrame, QSizePolicy, QProgressBar,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor
@@ -85,6 +86,19 @@ PROVEEDORES = {
     },
 }
 
+# ── Catálogo de modelos locales ──────────────────────────────
+CATALOGO_MODELOS = [
+    # (nombre,            tamaño,    descripcion)
+    ("mistral:7b",       "4.1 GB",  "Recomendado · texto, SQL, conversación"),
+    ("llama3.2:3b",      "2.0 GB",  "Liviano · bueno con 8 GB RAM"),
+    ("llama3.1:8b",      "4.7 GB",  "Más razonamiento que mistral"),
+    ("qwen2.5:7b",       "4.4 GB",  "Excelente para código y SQL"),
+    ("gemma2:2b",        "1.6 GB",  "Ultra liviano · para PCs con poca RAM"),
+    ("phi4:14b",         "8.9 GB",  "Muy potente · requiere 16+ GB RAM"),
+    ("deepseek-r1:7b",   "4.7 GB",  "Razonamiento paso a paso"),
+    ("codellama:7b",     "3.8 GB",  "Especializado en código / SQL"),
+]
+
 # ── System prompt ────────────────────────────────────────────
 _SYSTEM_TPL = """Sos un asistente contable argentino para el estudio "{estudio}".
 Tenés acceso a la base de datos SQLite del software. Cuando necesités consultar datos, \
@@ -120,8 +134,12 @@ def _schema_resumido() -> str:
 
 
 def _fmt_error(e: Exception) -> str:
-    """Convierte excepciones de red en mensajes claros para el usuario."""
     if isinstance(e, urllib.error.HTTPError):
+        if e.code == 404:
+            return (
+                "Modelo no encontrado en Ollama (404).\n"
+                "El modelo no está instalado. Abriendo pestaña 🗂 Modelos para instalarlo..."
+            )
         if e.code == 429:
             return (
                 "Límite de requests alcanzado (429 Too Many Requests).\n"
@@ -139,7 +157,6 @@ def _fmt_error(e: Exception) -> str:
 
     if isinstance(e, urllib.error.URLError):
         reason = e.reason
-        # WinError 10061 (Windows) / errno 111 (Linux) = conexión rechazada
         errno_ = getattr(reason, "errno", None)
         if errno_ in (10061, 111):
             return (
@@ -147,7 +164,6 @@ def _fmt_error(e: Exception) -> str:
                 "Iniciá Ollama antes de usar el chat: ejecutá 'ollama serve' en una terminal,\n"
                 "o abrí la aplicación Ollama desde el menú de inicio."
             )
-        # getaddrinfo failed = URL no resoluble
         if errno_ in (11001, -2, -3):
             return "No se pudo resolver la URL del servidor. Revisá la dirección en Configuración IA."
         return f"Error de conexión: {reason}"
@@ -165,14 +181,25 @@ def _btn(text: str, color: str = _ACCENT) -> QPushButton:
     return b
 
 
+def _tabla_style() -> str:
+    return (
+        f"QTableWidget {{ background: {_BG2}; border: 1px solid {_BORDER}; "
+        f"gridline-color: {_BORDER}; color: {_TEXT}; }}"
+        f"QTableWidget::item {{ padding: 4px 8px; }}"
+        f"QTableWidget::item:alternate {{ background: {_BG3}; }}"
+        f"QHeaderView::section {{ background: {_BG3}; color: {_ACCENT}; "
+        f"padding: 4px 8px; border: none; font-weight: bold; }}"
+    )
+
+
 # ══════════════════════════════════════════════════════════════
 #  WORKER: LLAMADA AL LLM
 # ══════════════════════════════════════════════════════════════
 
 class WorkerChat(QThread):
-    respuesta  = pyqtSignal(str)
-    sql_usado  = pyqtSignal(str, str)   # sql, resultado_json
-    error      = pyqtSignal(str)
+    respuesta = pyqtSignal(str)
+    sql_usado = pyqtSignal(str, str)
+    error     = pyqtSignal(str)
 
     def __init__(self, mensajes: list[dict], cfg: dict):
         super().__init__()
@@ -182,42 +209,35 @@ class WorkerChat(QThread):
     def run(self):
         try:
             resp = self._llamar(self._mensajes)
-
-            sql = self._extraer_sql(resp)
+            sql  = self._extraer_sql(resp)
             if sql:
                 resultado = self._ejecutar_sql(sql)
                 self.sql_usado.emit(sql, resultado)
-                # Segunda vuelta: LLM recibe los datos y formula la respuesta
                 msgs2 = self._mensajes + [
                     {"role": "assistant", "content": resp},
                     {"role": "user",      "content": f"[RESULTADO DE LA CONSULTA]\n{resultado}"},
                 ]
                 resp = self._llamar(msgs2)
-
             self.respuesta.emit(resp)
         except Exception as e:
             self.error.emit(_fmt_error(e))
 
-    # ── HTTP ─────────────────────────────────────────────────
-
     def _llamar(self, mensajes: list[dict]) -> str:
         cfg  = self._cfg
         modo = cfg.get("ai_modo", "local")
-
         if modo == "local":
-            url    = cfg.get("ai_ollama_url", "http://localhost:11434").rstrip("/") + "/api/chat"
-            modelo = cfg.get("ai_modelo_local", "mistral:7b")
+            url     = cfg.get("ai_ollama_url", "http://localhost:11434").rstrip("/") + "/api/chat"
+            modelo  = cfg.get("ai_modelo_local", "mistral:7b")
             payload = {"model": modelo, "messages": mensajes, "stream": False}
             data    = self._post(url, payload)
             return data["message"]["content"]
         else:
-            base   = cfg.get("ai_cloud_base_url", "").rstrip("/")
-            url    = f"{base}/chat/completions"
+            base    = cfg.get("ai_cloud_base_url", "").rstrip("/")
+            url     = f"{base}/chat/completions"
             api_key = cfg.get("ai_api_key", "")
             modelo  = cfg.get("ai_modelo_cloud", "gemini-2.0-flash")
             payload = {"model": modelo, "messages": mensajes, "max_tokens": 2048}
-            headers = {"Authorization": f"Bearer {api_key}"}
-            data    = self._post(url, payload, headers)
+            data    = self._post(url, payload, {"Authorization": f"Bearer {api_key}"})
             return data["choices"][0]["message"]["content"]
 
     def _post(self, url: str, payload: dict, extra: dict | None = None) -> dict:
@@ -229,15 +249,12 @@ class WorkerChat(QThread):
         with urllib.request.urlopen(req, timeout=90) as r:
             return json.loads(r.read())
 
-    # ── SQL ──────────────────────────────────────────────────
-
     def _extraer_sql(self, texto: str) -> str | None:
         m = re.search(r"```(?:sql|SQL)\s*\n(.*?)\n```", texto, re.DOTALL)
         if not m:
             return None
-        sql = m.group(1).strip()
-        # Solo SELECT permitido
-        primera = sql.lstrip().split()[0].upper() if sql.split() else ""
+        sql      = m.group(1).strip()
+        primera  = sql.lstrip().split()[0].upper() if sql.split() else ""
         return sql if primera == "SELECT" else None
 
     def _ejecutar_sql(self, sql: str) -> str:
@@ -282,11 +299,9 @@ class WorkerArranqueOllama(QThread):
         self._ping_url = ollama_url.rstrip("/") + "/api/tags"
 
     def run(self):
-        # Si ya está corriendo, listo
         if self._ping():
             self.listo.emit()
             return
-
         exe = _encontrar_ollama()
         if not exe:
             self.fallo.emit(
@@ -294,7 +309,6 @@ class WorkerArranqueOllama(QThread):
                 "Descargalo desde ollama.com e instalalo, luego reiniciá el software."
             )
             return
-
         self.estado.emit("Iniciando Ollama...")
         try:
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -307,14 +321,12 @@ class WorkerArranqueOllama(QThread):
         except Exception as e:
             self.fallo.emit(f"No se pudo iniciar Ollama: {e}")
             return
-
         for i in range(30):
             time.sleep(1)
             self.estado.emit(f"Esperando Ollama... {i + 1}s")
             if self._ping():
                 self.listo.emit()
                 return
-
         self.fallo.emit(
             "Ollama tardó demasiado en iniciar (>30s).\n"
             "Intentá iniciarlo manualmente con 'ollama serve'."
@@ -322,11 +334,86 @@ class WorkerArranqueOllama(QThread):
 
     def _ping(self) -> bool:
         try:
-            req = urllib.request.Request(self._ping_url)
-            with urllib.request.urlopen(req, timeout=2):
+            with urllib.request.urlopen(
+                urllib.request.Request(self._ping_url), timeout=2
+            ):
                 return True
         except Exception:
             return False
+
+
+# ══════════════════════════════════════════════════════════════
+#  WORKER: LISTAR MODELOS INSTALADOS
+# ══════════════════════════════════════════════════════════════
+
+class WorkerListarModelos(QThread):
+    resultado = pyqtSignal(list)
+    error     = pyqtSignal(str)
+
+    def __init__(self, ollama_url: str):
+        super().__init__()
+        self._url = ollama_url.rstrip("/") + "/api/tags"
+
+    def run(self):
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(self._url), timeout=5
+            ) as r:
+                data = json.loads(r.read())
+            self.resultado.emit(data.get("models", []))
+        except Exception as e:
+            self.error.emit(_fmt_error(e))
+
+
+# ══════════════════════════════════════════════════════════════
+#  WORKER: DESCARGAR MODELO (ollama pull)
+# ══════════════════════════════════════════════════════════════
+
+class WorkerPull(QThread):
+    progreso  = pyqtSignal(str, int)  # mensaje, porcentaje (-1 = indeterminado)
+    terminado = pyqtSignal()
+    error     = pyqtSignal(str)
+
+    def __init__(self, modelo: str, ollama_url: str):
+        super().__init__()
+        self._modelo    = modelo
+        self._url       = ollama_url.rstrip("/") + "/api/pull"
+        self._cancelado = False
+
+    def cancelar(self):
+        self._cancelado = True
+
+    def run(self):
+        try:
+            payload = json.dumps({"name": self._modelo, "stream": True}).encode()
+            req = urllib.request.Request(
+                self._url, data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                for linea in resp:
+                    if self._cancelado:
+                        return
+                    if not linea.strip():
+                        continue
+                    try:
+                        obj = json.loads(linea)
+                    except json.JSONDecodeError:
+                        continue
+                    status    = obj.get("status", "")
+                    total     = obj.get("total", 0)
+                    completed = obj.get("completed", 0)
+                    if total:
+                        self.progreso.emit(status, int(completed * 100 / total))
+                    else:
+                        self.progreso.emit(status, -1)
+                    if status == "success":
+                        self.terminado.emit()
+                        return
+            self.terminado.emit()
+        except Exception as e:
+            if not self._cancelado:
+                self.error.emit(_fmt_error(e))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -343,7 +430,7 @@ class TabConfigIA(QWidget):
         lay.setContentsMargins(16, 16, 16, 16)
         lay.setSpacing(14)
 
-        # ── Modo ─────────────────────────────────────────────
+        # ── Modo ──────────────────────────────────────────────
         grp_modo = QGroupBox("Modo")
         gm = QHBoxLayout()
         self.rb_local = QRadioButton("🖥️  Local (Ollama)")
@@ -369,15 +456,16 @@ class TabConfigIA(QWidget):
         gl.addLayout(row_url)
 
         row_mod = QHBoxLayout()
-        row_mod.addWidget(QLabel("Modelo:"))
-        self.inp_modelo_local = QLineEdit()
-        self.inp_modelo_local.setPlaceholderText("mistral:7b  ·  llama3.2:3b")
-        row_mod.addWidget(self.inp_modelo_local)
+        row_mod.addWidget(QLabel("Modelo activo:"))
+        self.cmb_modelo_local = QComboBox()
+        self.cmb_modelo_local.setEditable(True)
+        self.cmb_modelo_local.setPlaceholderText("Seleccioná o escribí el modelo")
+        row_mod.addWidget(self.cmb_modelo_local)
         gl.addLayout(row_mod)
 
         info_local = QLabel(
-            "Ollama debe estar corriendo antes de usar el chat.\n"
-            "Instalación: https://ollama.com  —  Modelos recomendados: mistral:7b, llama3.2:3b"
+            "Instalá y cambiá modelos desde la pestaña 🗂 Modelos.\n"
+            "Ollama debe estar corriendo. Instalación: https://ollama.com"
         )
         info_local.setStyleSheet(f"color: {_TEXT_DIM}; font-size: 12px;")
         info_local.setWordWrap(True)
@@ -438,7 +526,7 @@ class TabConfigIA(QWidget):
         lay.addWidget(sep)
 
         row_btns = QHBoxLayout()
-        btn_test  = _btn("🔌  Probar conexión", _ACCENT2)
+        btn_test    = _btn("🔌  Probar conexión", _ACCENT2)
         btn_test.clicked.connect(self._probar)
         btn_guardar = _btn("💾  Guardar", _GREEN)
         btn_guardar.clicked.connect(self._guardar)
@@ -452,7 +540,6 @@ class TabConfigIA(QWidget):
         lay.addLayout(row_btns)
         lay.addStretch()
 
-        # ── Poblar valores ───────────────────────────────────
         self._cargar_valores()
         self.rb_local.toggled.connect(self._toggle_seccion)
         self._toggle_seccion(self.rb_local.isChecked())
@@ -465,15 +552,12 @@ class TabConfigIA(QWidget):
             self.rb_cloud.setChecked(True)
         else:
             self.rb_local.setChecked(True)
-
         self.inp_ollama_url.setText(cfg.get("ai_ollama_url", "http://localhost:11434"))
-        self.inp_modelo_local.setText(cfg.get("ai_modelo_local", "mistral:7b"))
-
+        self.cmb_modelo_local.setCurrentText(cfg.get("ai_modelo_local", "mistral:7b"))
         prov = cfg.get("ai_proveedor", "Gemini Flash")
         idx  = self.cmb_proveedor.findText(prov)
         if idx >= 0:
             self.cmb_proveedor.setCurrentIndex(idx)
-
         self.inp_api_key.setText(cfg.get("ai_api_key", ""))
         self.inp_modelo_cloud.setText(cfg.get("ai_modelo_cloud", "gemini-2.0-flash"))
 
@@ -489,19 +573,19 @@ class TabConfigIA(QWidget):
         cfg = settings.cargar()
         cfg["ai_modo"]         = "local" if self.rb_local.isChecked() else "cloud"
         cfg["ai_ollama_url"]   = self.inp_ollama_url.text().strip() or "http://localhost:11434"
-        cfg["ai_modelo_local"] = self.inp_modelo_local.text().strip() or "mistral:7b"
+        cfg["ai_modelo_local"] = self.cmb_modelo_local.currentText().strip() or "mistral:7b"
         prov = self.cmb_proveedor.currentText()
-        cfg["ai_proveedor"]       = prov
-        cfg["ai_cloud_base_url"]  = PROVEEDORES.get(prov, {}).get("base_url", "")
-        cfg["ai_api_key"]         = self.inp_api_key.text().strip()
-        cfg["ai_modelo_cloud"]    = self.inp_modelo_cloud.text().strip()
+        cfg["ai_proveedor"]      = prov
+        cfg["ai_cloud_base_url"] = PROVEEDORES.get(prov, {}).get("base_url", "")
+        cfg["ai_api_key"]        = self.inp_api_key.text().strip()
+        cfg["ai_modelo_cloud"]   = self.inp_modelo_cloud.text().strip()
         settings.guardar(cfg)
         self._cfg = cfg
         self.lbl_test.setText("✅  Guardado.")
 
     def _probar(self):
         self.lbl_test.setText("Probando...")
-        cfg = self._get_config_actual()
+        cfg    = self._get_config_actual()
         worker = _WorkerTest(cfg)
         worker.resultado.connect(lambda ok, msg: self.lbl_test.setText(
             f"✅  {msg}" if ok else f"❌  {msg}"
@@ -513,7 +597,7 @@ class TabConfigIA(QWidget):
         cfg = settings.cargar()
         cfg["ai_modo"]         = "local" if self.rb_local.isChecked() else "cloud"
         cfg["ai_ollama_url"]   = self.inp_ollama_url.text().strip() or "http://localhost:11434"
-        cfg["ai_modelo_local"] = self.inp_modelo_local.text().strip() or "mistral:7b"
+        cfg["ai_modelo_local"] = self.cmb_modelo_local.currentText().strip() or "mistral:7b"
         prov = self.cmb_proveedor.currentText()
         cfg["ai_proveedor"]      = prov
         cfg["ai_cloud_base_url"] = PROVEEDORES.get(prov, {}).get("base_url", "")
@@ -523,6 +607,31 @@ class TabConfigIA(QWidget):
 
     def get_config(self) -> dict:
         return self._get_config_actual()
+
+    def actualizar_modelos(self, modelos: list[str]):
+        """Llamado por TabModelos cuando refresca la lista de instalados."""
+        actual = self.cmb_modelo_local.currentText()
+        self.cmb_modelo_local.clear()
+        for m in modelos:
+            self.cmb_modelo_local.addItem(m)
+        if actual:
+            idx = self.cmb_modelo_local.findText(actual)
+            if idx >= 0:
+                self.cmb_modelo_local.setCurrentIndex(idx)
+            else:
+                self.cmb_modelo_local.setCurrentText(actual)
+
+    def set_modelo_local(self, modelo: str):
+        """Llamado por TabModelos cuando el usuario elige 'Usar'."""
+        idx = self.cmb_modelo_local.findText(modelo)
+        if idx >= 0:
+            self.cmb_modelo_local.setCurrentIndex(idx)
+        else:
+            self.cmb_modelo_local.setCurrentText(modelo)
+        cfg = settings.cargar()
+        cfg["ai_modelo_local"] = modelo
+        settings.guardar(cfg)
+        self._cfg = cfg
 
 
 class _WorkerTest(QThread):
@@ -538,8 +647,9 @@ class _WorkerTest(QThread):
         try:
             if modo == "local":
                 url = cfg.get("ai_ollama_url", "http://localhost:11434").rstrip("/") + "/api/tags"
-                req = urllib.request.Request(url)
-                with urllib.request.urlopen(req, timeout=5) as r:
+                with urllib.request.urlopen(
+                    urllib.request.Request(url), timeout=5
+                ) as r:
                     data   = json.loads(r.read())
                     models = [m["name"] for m in data.get("models", [])]
                     txt    = f"Ollama OK — {len(models)} modelo(s): {', '.join(models[:3])}"
@@ -552,22 +662,242 @@ class _WorkerTest(QThread):
                     self.resultado.emit(False, "API Key vacía.")
                     return
                 url     = f"{base}/chat/completions"
-                payload = {
-                    "model": model,
-                    "messages": [{"role": "user", "content": "Hola"}],
-                    "max_tokens": 5,
-                }
-                body = json.dumps(payload).encode()
-                req  = urllib.request.Request(
+                payload = {"model": model, "messages": [{"role": "user", "content": "Hola"}], "max_tokens": 5}
+                body    = json.dumps(payload).encode()
+                req     = urllib.request.Request(
                     url, data=body,
-                    headers={"Content-Type": "application/json",
-                             "Authorization": f"Bearer {key}"},
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
                 )
                 with urllib.request.urlopen(req, timeout=15) as r:
                     json.loads(r.read())
                 self.resultado.emit(True, f"Conexión OK con {cfg.get('ai_proveedor','')}")
         except Exception as e:
             self.resultado.emit(False, _fmt_error(e))
+
+
+# ══════════════════════════════════════════════════════════════
+#  TAB: GESTIÓN DE MODELOS
+# ══════════════════════════════════════════════════════════════
+
+class TabModelos(QWidget):
+    modelo_activo_cambiado = pyqtSignal(str)
+
+    def __init__(self, config_tab: TabConfigIA):
+        super().__init__()
+        self.setStyleSheet(STYLE_BASE)
+        self._config_tab     = config_tab
+        self._worker_listar: WorkerListarModelos | None = None
+        self._worker_pull:   WorkerPull | None          = None
+        self._instalados:    list[str]                  = []
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(10)
+
+        # ── Barra superior ─────────────────────────────────────
+        row_top = QHBoxLayout()
+        self.lbl_url = QLabel("")
+        self.lbl_url.setStyleSheet(f"color: {_TEXT_DIM}; font-size: 12px;")
+        btn_ref = _btn("🔄  Actualizar", _ACCENT2)
+        btn_ref.clicked.connect(self._refrescar)
+        row_top.addWidget(self.lbl_url)
+        row_top.addStretch()
+        row_top.addWidget(btn_ref)
+        lay.addLayout(row_top)
+
+        # ── Paneles lado a lado ─────────────────────────────────
+        row_paneles = QHBoxLayout()
+        row_paneles.setSpacing(12)
+
+        # Instalados
+        grp_inst = QGroupBox("Modelos instalados")
+        gl = QVBoxLayout()
+        self.tbl_inst = QTableWidget(0, 3)
+        self.tbl_inst.setHorizontalHeaderLabels(["Modelo", "Tamaño", ""])
+        self.tbl_inst.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.tbl_inst.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_inst.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_inst.verticalHeader().setVisible(False)
+        self.tbl_inst.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tbl_inst.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tbl_inst.setAlternatingRowColors(True)
+        self.tbl_inst.setStyleSheet(_tabla_style())
+        gl.addWidget(self.tbl_inst)
+        grp_inst.setLayout(gl)
+        row_paneles.addWidget(grp_inst, 1)
+
+        # Catálogo
+        grp_cat = QGroupBox("Disponibles para instalar")
+        gc = QVBoxLayout()
+        self.tbl_cat = QTableWidget(len(CATALOGO_MODELOS), 4)
+        self.tbl_cat.setHorizontalHeaderLabels(["Modelo", "Tamaño", "Descripción", ""])
+        self.tbl_cat.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_cat.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_cat.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.tbl_cat.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_cat.verticalHeader().setVisible(False)
+        self.tbl_cat.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tbl_cat.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tbl_cat.setAlternatingRowColors(True)
+        self.tbl_cat.setStyleSheet(_tabla_style())
+        for i, (nombre, tamano, desc) in enumerate(CATALOGO_MODELOS):
+            self.tbl_cat.setItem(i, 0, QTableWidgetItem(nombre))
+            self.tbl_cat.setItem(i, 1, QTableWidgetItem(tamano))
+            self.tbl_cat.setItem(i, 2, QTableWidgetItem(desc))
+            btn_i = _btn("⬇ Instalar", _ACCENT2)
+            btn_i.clicked.connect(lambda _, n=nombre: self._instalar(n))
+            self.tbl_cat.setCellWidget(i, 3, btn_i)
+        self.tbl_cat.resizeRowsToContents()
+        gc.addWidget(self.tbl_cat)
+        grp_cat.setLayout(gc)
+        row_paneles.addWidget(grp_cat, 1)
+
+        lay.addLayout(row_paneles, 1)
+
+        # ── Barra de progreso de descarga ───────────────────────
+        self.frm_prog = QFrame()
+        self.frm_prog.setStyleSheet(
+            f"background: {_BG2}; border: 1px solid {_BORDER}; border-radius: 6px;"
+        )
+        fp = QHBoxLayout(self.frm_prog)
+        fp.setContentsMargins(12, 6, 12, 6)
+        self.lbl_prog_nombre = QLabel("")
+        self.lbl_prog_nombre.setStyleSheet(f"color: {_ACCENT}; font-weight: bold;")
+        self.lbl_prog_status = QLabel("")
+        self.lbl_prog_status.setStyleSheet(f"color: {_TEXT_DIM}; font-size: 12px;")
+        self.pbar = QProgressBar()
+        self.pbar.setRange(0, 100)
+        self.pbar.setFixedWidth(220)
+        self.pbar.setStyleSheet(
+            f"QProgressBar {{ background: {_BG3}; border: 1px solid {_BORDER}; "
+            f"border-radius: 4px; height: 14px; text-align: center; }}"
+            f"QProgressBar::chunk {{ background: {_ACCENT}; border-radius: 4px; }}"
+        )
+        btn_cancel = _btn("✖ Cancelar", _RED)
+        btn_cancel.clicked.connect(self._cancelar)
+        fp.addWidget(self.lbl_prog_nombre)
+        fp.addSpacing(8)
+        fp.addWidget(self.lbl_prog_status)
+        fp.addStretch()
+        fp.addWidget(self.pbar)
+        fp.addSpacing(8)
+        fp.addWidget(btn_cancel)
+        self.frm_prog.setVisible(False)
+        lay.addWidget(self.frm_prog)
+
+        self._refrescar()
+
+    # ── Refrescar lista ────────────────────────────────────────
+
+    def _refrescar(self):
+        cfg = self._config_tab.get_config()
+        url = cfg.get("ai_ollama_url", "http://localhost:11434")
+        self.lbl_url.setText(f"Ollama: {url}")
+        self._worker_listar = WorkerListarModelos(url)
+        self._worker_listar.resultado.connect(self._on_modelos)
+        self._worker_listar.error.connect(self._on_error_listar)
+        self._worker_listar.start()
+
+    def _on_modelos(self, modelos: list):
+        self._instalados   = [m["name"] for m in modelos]
+        cfg_modelo         = self._config_tab.get_config().get("ai_modelo_local", "")
+
+        self.tbl_inst.setRowCount(0)
+        for m in modelos:
+            nombre = m["name"]
+            size_b = m.get("size", 0)
+            size_s = f"{size_b / 1e9:.1f} GB" if size_b else "—"
+            ri     = self.tbl_inst.rowCount()
+            self.tbl_inst.insertRow(ri)
+
+            item_n = QTableWidgetItem(nombre)
+            if nombre == cfg_modelo:
+                item_n.setForeground(QColor(_GREEN))
+            self.tbl_inst.setItem(ri, 0, item_n)
+            self.tbl_inst.setItem(ri, 1, QTableWidgetItem(size_s))
+
+            es_activo = nombre == cfg_modelo
+            btn_usar  = _btn("✔ Activo" if es_activo else "Usar",
+                             _GREEN if es_activo else _ACCENT)
+            btn_usar.clicked.connect(lambda _, n=nombre: self._usar(n))
+            self.tbl_inst.setCellWidget(ri, 2, btn_usar)
+
+        self._actualizar_catalogo()
+        self._config_tab.actualizar_modelos(self._instalados)
+
+    def _on_error_listar(self, msg: str):
+        self.tbl_inst.setRowCount(1)
+        item = QTableWidgetItem(f"⚠ {msg}")
+        item.setForeground(QColor(_RED))
+        self.tbl_inst.setItem(0, 0, item)
+
+    def _actualizar_catalogo(self):
+        for i in range(self.tbl_cat.rowCount()):
+            nombre = self.tbl_cat.item(i, 0).text()
+            btn    = self.tbl_cat.cellWidget(i, 3)
+            if nombre in self._instalados:
+                btn.setText("✔ Instalado")
+                btn.setEnabled(False)
+            else:
+                btn.setText("⬇ Instalar")
+                btn.setEnabled(True)
+
+    # ── Instalar ───────────────────────────────────────────────
+
+    def iniciar_instalacion(self, modelo: str):
+        """Llamable desde TabChat para auto-instalar en caso de 404."""
+        self._instalar(modelo)
+
+    def _instalar(self, modelo: str):
+        if self._worker_pull and self._worker_pull.isRunning():
+            QMessageBox.warning(self, "Descarga en curso",
+                                "Ya hay un modelo descargándose. Esperá a que termine.")
+            return
+        cfg = self._config_tab.get_config()
+        url = cfg.get("ai_ollama_url", "http://localhost:11434")
+        self.lbl_prog_nombre.setText(f"Descargando: {modelo}")
+        self.lbl_prog_status.setText("Iniciando...")
+        self.pbar.setRange(0, 100)
+        self.pbar.setValue(0)
+        self.frm_prog.setVisible(True)
+        self._worker_pull = WorkerPull(modelo, url)
+        self._worker_pull.progreso.connect(self._on_progreso)
+        self._worker_pull.terminado.connect(lambda: self._on_terminado(modelo))
+        self._worker_pull.error.connect(self._on_error_pull)
+        self._worker_pull.start()
+
+    def _on_progreso(self, msg: str, pct: int):
+        self.lbl_prog_status.setText(msg)
+        if pct >= 0:
+            self.pbar.setRange(0, 100)
+            self.pbar.setValue(pct)
+        else:
+            self.pbar.setRange(0, 0)   # animación indeterminada
+
+    def _on_terminado(self, modelo: str):
+        self.frm_prog.setVisible(False)
+        self._refrescar()
+        QMessageBox.information(
+            self, "Instalación completa",
+            f"'{modelo}' instalado correctamente.\n"
+            "Usá el botón 'Usar' para activarlo."
+        )
+
+    def _on_error_pull(self, msg: str):
+        self.frm_prog.setVisible(False)
+        QMessageBox.critical(self, "Error de descarga", msg)
+
+    def _cancelar(self):
+        if self._worker_pull:
+            self._worker_pull.cancelar()
+        self.frm_prog.setVisible(False)
+
+    # ── Activar modelo ─────────────────────────────────────────
+
+    def _usar(self, modelo: str):
+        self._config_tab.set_modelo_local(modelo)
+        self.modelo_activo_cambiado.emit(modelo)
+        self._refrescar()
 
 
 # ══════════════════════════════════════════════════════════════
@@ -609,12 +939,14 @@ def _escapar(texto: str) -> str:
 
 
 class TabChat(QWidget):
+    instalar_modelo = pyqtSignal(str)   # emitido en 404 para auto-instalar
+
     def __init__(self, tab_config: TabConfigIA):
         super().__init__()
         self.setStyleSheet(STYLE_BASE)
-        self._tab_config      = tab_config
-        self._historial:      list[dict] = []
-        self._worker:         WorkerChat | None = None
+        self._tab_config       = tab_config
+        self._historial:       list[dict] = []
+        self._worker:          WorkerChat | None = None
         self._arranque_worker: WorkerArranqueOllama | None = None
 
         lay = QVBoxLayout(self)
@@ -637,7 +969,8 @@ class TabChat(QWidget):
         self.chat.setOpenExternalLinks(False)
         self.chat.setReadOnly(True)
         self.chat.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        lay.addWidget(self.chat)
+        self.chat.setMinimumHeight(80)
+        lay.addWidget(self.chat, 1)
 
         # Input
         row_inp = QHBoxLayout()
@@ -699,20 +1032,21 @@ class TabChat(QWidget):
         if modo == "local":
             modelo = cfg.get("ai_modelo_local", "—")
             self.lbl_estado.setText(f"🖥️  Ollama — {modelo}")
+            self.lbl_estado.setStyleSheet(f"color: {_TEXT_DIM}; font-size: 12px;")
         else:
-            prov   = cfg.get("ai_proveedor", "—")
-            modelo = cfg.get("ai_modelo_cloud", "—")
-            key    = cfg.get("ai_api_key", "")
+            prov  = cfg.get("ai_proveedor", "—")
+            key   = cfg.get("ai_api_key", "")
             if not key:
                 self.lbl_estado.setText(f"☁️  {prov} — ⚠ sin API key")
                 self.lbl_estado.setStyleSheet(f"color: {_YELLOW}; font-size: 12px;")
             else:
+                modelo = cfg.get("ai_modelo_cloud", "—")
                 self.lbl_estado.setText(f"☁️  {prov} — {modelo}")
                 self.lbl_estado.setStyleSheet(f"color: {_TEXT_DIM}; font-size: 12px;")
 
     def _enviar(self):
         texto = self.inp.text().strip()
-        if not texto or self._worker and self._worker.isRunning():
+        if not texto or (self._worker and self._worker.isRunning()):
             return
         self.inp.clear()
         self._agregar_html(_HTML_USER.format(texto=_escapar(texto)))
@@ -733,6 +1067,7 @@ class TabChat(QWidget):
 
         self._set_input(False)
         self.lbl_estado.setText("🟡  Pensando...")
+        self.lbl_estado.setStyleSheet(f"color: {_YELLOW}; font-size: 12px;")
 
     def _on_respuesta(self, texto: str):
         self._agregar_html(_HTML_ASIST.format(texto=_escapar(texto)))
@@ -740,14 +1075,20 @@ class TabChat(QWidget):
         self._set_input(True)
         self._actualizar_estado()
 
-    def _on_sql(self, sql: str, resultado: str):
+    def _on_sql(self, sql: str, _resultado: str):
         self._agregar_html(_HTML_SQL.format(sql=_escapar(sql.replace("\n", " "))))
 
     def _on_error(self, msg: str):
         self._agregar_html(_HTML_ERROR.format(texto=_escapar(msg)))
         self._set_input(True)
-        self.lbl_estado.setText("🔴  Error de conexión")
+        self.lbl_estado.setText("🔴  Error")
         self.lbl_estado.setStyleSheet(f"color: {_RED}; font-size: 12px;")
+        # Modelo no instalado → disparar auto-instalación
+        if "Modelo no encontrado" in msg:
+            cfg    = self._tab_config.get_config()
+            modelo = cfg.get("ai_modelo_local", "")
+            if modelo:
+                self.instalar_modelo.emit(modelo)
 
     def _agregar_html(self, html: str):
         cursor = self.chat.textCursor()
@@ -791,15 +1132,30 @@ class PanelAsistente(QWidget):
         hl.addStretch()
         lay.addWidget(header)
 
+        config_tab  = TabConfigIA()
+        chat_tab    = TabChat(config_tab)
+        tab_modelos = TabModelos(config_tab)
+
         tabs = QTabWidget()
-        config_tab = TabConfigIA()
-        chat_tab   = TabChat(config_tab)
+        tabs.addTab(chat_tab,    "💬  Chat")
+        tabs.addTab(tab_modelos, "🗂  Modelos")
+        tabs.addTab(config_tab,  "⚙️  Configuración IA")
 
-        tabs.addTab(chat_tab,   "💬  Chat")
-        tabs.addTab(config_tab, "⚙️  Configuración IA")
-
-        # Al volver al chat re-verifica Ollama (por si cambió la config a local)
+        # Re-verificar Ollama al volver al chat
         tabs.currentChanged.connect(
             lambda i: chat_tab._auto_arrancar_ollama() if i == 0 else None
         )
+
+        # Modelo 404 → ir a tab Modelos y arrancar descarga
+        def _on_instalar(modelo: str):
+            tabs.setCurrentWidget(tab_modelos)
+            tab_modelos.iniciar_instalacion(modelo)
+
+        chat_tab.instalar_modelo.connect(_on_instalar)
+
+        # Cambio de modelo activo → actualizar estado del chat
+        tab_modelos.modelo_activo_cambiado.connect(
+            lambda _: chat_tab._actualizar_estado()
+        )
+
         lay.addWidget(tabs)
