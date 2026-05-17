@@ -246,8 +246,15 @@ class WorkerChat(QThread):
         if extra:
             headers.update(extra)
         req = urllib.request.Request(url, data=body, headers=headers)
-        with urllib.request.urlopen(req, timeout=90) as r:
-            return json.loads(r.read())
+        for intento in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=90) as r:
+                    return json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and intento < 2:
+                    time.sleep(5 * (intento + 1))
+                    continue
+                raise
 
     def _extraer_sql(self, texto: str) -> str | None:
         m = re.search(r"```(?:sql|SQL)\s*\n(.*?)\n```", texto, re.DOTALL)
@@ -526,13 +533,13 @@ class TabConfigIA(QWidget):
         lay.addWidget(sep)
 
         row_btns = QHBoxLayout()
-        btn_test    = _btn("🔌  Probar conexión", _ACCENT2)
-        btn_test.clicked.connect(self._probar)
+        self._btn_test = _btn("🔌  Probar conexión", _ACCENT2)
+        self._btn_test.clicked.connect(self._probar)
         btn_guardar = _btn("💾  Guardar", _GREEN)
         btn_guardar.clicked.connect(self._guardar)
         self.lbl_test = QLabel("")
         self.lbl_test.setStyleSheet(f"color: {_TEXT_DIM}; font-size: 12px;")
-        row_btns.addWidget(btn_test)
+        row_btns.addWidget(self._btn_test)
         row_btns.addWidget(btn_guardar)
         row_btns.addSpacing(12)
         row_btns.addWidget(self.lbl_test)
@@ -584,14 +591,49 @@ class TabConfigIA(QWidget):
         self.lbl_test.setText("✅  Guardado.")
 
     def _probar(self):
-        self.lbl_test.setText("Probando...")
-        cfg    = self._get_config_actual()
-        worker = _WorkerTest(cfg)
-        worker.resultado.connect(lambda ok, msg: self.lbl_test.setText(
-            f"✅  {msg}" if ok else f"❌  {msg}"
+        cfg  = self._get_config_actual()
+        modo = cfg.get("ai_modo", "local")
+        if modo == "local":
+            self.lbl_test.setText("Iniciando Ollama...")
+            self._btn_test.setEnabled(False)
+            url    = cfg.get("ai_ollama_url", "http://localhost:11434")
+            worker = WorkerArranqueOllama(url)
+            worker.estado.connect(self.lbl_test.setText)
+            worker.listo.connect(self._on_ollama_listo)
+            worker.fallo.connect(self._on_ollama_fallo)
+            worker.start()
+            self._arranque_worker = worker
+        else:
+            self.lbl_test.setText("Probando conexión cloud...")
+            worker = _WorkerTest(cfg)
+            worker.resultado.connect(lambda ok, msg: self.lbl_test.setText(
+                f"✅  {msg}" if ok else f"❌  {msg}"
+            ))
+            worker.start()
+            self._test_worker = worker
+
+    def _on_ollama_listo(self):
+        cfg = self._get_config_actual()
+        url = cfg.get("ai_ollama_url", "http://localhost:11434")
+        self.lbl_test.setText("Ollama activo — cargando modelos...")
+        worker = WorkerListarModelos(url)
+        worker.resultado.connect(self._on_modelos_listados)
+        worker.error.connect(lambda e: (
+            self.lbl_test.setText(f"❌  {e}"),
+            self._btn_test.setEnabled(True),
         ))
         worker.start()
-        self._test_worker = worker
+        self._listar_worker = worker
+
+    def _on_ollama_fallo(self, msg: str):
+        self.lbl_test.setText(f"❌  {msg}")
+        self._btn_test.setEnabled(True)
+
+    def _on_modelos_listados(self, modelos: list[str]):
+        self.actualizar_modelos(modelos)
+        n = len(modelos)
+        self.lbl_test.setText(f"✅  Ollama OK — {n} modelo(s) disponible(s)")
+        self._btn_test.setEnabled(True)
 
     def _get_config_actual(self) -> dict:
         cfg = settings.cargar()
@@ -655,22 +697,21 @@ class _WorkerTest(QThread):
                     txt    = f"Ollama OK — {len(models)} modelo(s): {', '.join(models[:3])}"
                     self.resultado.emit(True, txt)
             else:
-                base  = cfg.get("ai_cloud_base_url", "").rstrip("/")
-                key   = cfg.get("ai_api_key", "")
-                model = cfg.get("ai_modelo_cloud", "")
+                base = cfg.get("ai_cloud_base_url", "").rstrip("/")
+                key  = cfg.get("ai_api_key", "")
                 if not key:
                     self.resultado.emit(False, "API Key vacía.")
                     return
-                url     = f"{base}/chat/completions"
-                payload = {"model": model, "messages": [{"role": "user", "content": "Hola"}], "max_tokens": 5}
-                body    = json.dumps(payload).encode()
-                req     = urllib.request.Request(
-                    url, data=body,
-                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+                url = f"{base}/models"
+                req = urllib.request.Request(
+                    url,
+                    headers={"Authorization": f"Bearer {key}"},
                 )
                 with urllib.request.urlopen(req, timeout=15) as r:
-                    json.loads(r.read())
-                self.resultado.emit(True, f"Conexión OK con {cfg.get('ai_proveedor','')}")
+                    data = json.loads(r.read())
+                n = len(data.get("data", []))
+                prov = cfg.get("ai_proveedor", "")
+                self.resultado.emit(True, f"Conexión OK con {prov} — {n} modelos disponibles")
         except Exception as e:
             self.resultado.emit(False, _fmt_error(e))
 
