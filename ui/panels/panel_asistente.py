@@ -200,6 +200,7 @@ class WorkerChat(QThread):
     respuesta = pyqtSignal(str)
     sql_usado = pyqtSignal(str, str)
     error     = pyqtSignal(str)
+    estado    = pyqtSignal(str)
 
     def __init__(self, mensajes: list[dict], cfg: dict):
         super().__init__()
@@ -208,7 +209,7 @@ class WorkerChat(QThread):
 
     def run(self):
         try:
-            resp = self._llamar(self._mensajes)
+            resp = self._llamar_con_retry(self._mensajes)
             sql  = self._extraer_sql(resp)
             if sql:
                 resultado = self._ejecutar_sql(sql)
@@ -217,10 +218,23 @@ class WorkerChat(QThread):
                     {"role": "assistant", "content": resp},
                     {"role": "user",      "content": f"[RESULTADO DE LA CONSULTA]\n{resultado}"},
                 ]
-                resp = self._llamar(msgs2)
+                resp = self._llamar_con_retry(msgs2)
             self.respuesta.emit(resp)
         except Exception as e:
             self.error.emit(_fmt_error(e))
+
+    def _llamar_con_retry(self, mensajes: list[dict]) -> str:
+        for intento in range(3):
+            try:
+                return self._llamar(mensajes)
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and intento < 2:
+                    espera = int(e.headers.get("Retry-After", 0) or 0) or 60
+                    for s in range(espera, 0, -5):
+                        self.estado.emit(f"⏳  Rate limit — reintentando en {s}s...")
+                        time.sleep(min(5, s))
+                    continue
+                raise
 
     def _llamar(self, mensajes: list[dict]) -> str:
         cfg  = self._cfg
@@ -246,15 +260,8 @@ class WorkerChat(QThread):
         if extra:
             headers.update(extra)
         req = urllib.request.Request(url, data=body, headers=headers)
-        for intento in range(3):
-            try:
-                with urllib.request.urlopen(req, timeout=90) as r:
-                    return json.loads(r.read())
-            except urllib.error.HTTPError as e:
-                if e.code == 429 and intento < 2:
-                    time.sleep(5 * (intento + 1))
-                    continue
-                raise
+        with urllib.request.urlopen(req, timeout=90) as r:
+            return json.loads(r.read())
 
     def _extraer_sql(self, texto: str) -> str | None:
         m = re.search(r"```(?:sql|SQL)\s*\n(.*?)\n```", texto, re.DOTALL)
@@ -1105,6 +1112,7 @@ class TabChat(QWidget):
         self._worker.respuesta.connect(self._on_respuesta)
         self._worker.sql_usado.connect(self._on_sql)
         self._worker.error.connect(self._on_error)
+        self._worker.estado.connect(self.lbl_estado.setText)
         self._worker.start()
 
         self._set_input(False)
