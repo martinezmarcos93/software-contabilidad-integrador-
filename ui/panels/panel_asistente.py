@@ -367,8 +367,7 @@ class WorkerListarModelos(QThread):
                 urllib.request.Request(self._url), timeout=5
             ) as r:
                 data = json.loads(r.read())
-            models = [m["name"] for m in data.get("models", [])]
-            self.resultado.emit(models)
+            self.resultado.emit(data.get("models", []))
         except Exception as e:
             self.error.emit(_fmt_error(e))
 
@@ -630,9 +629,10 @@ class TabConfigIA(QWidget):
         self.lbl_test.setText(f"❌  {msg}")
         self._btn_test.setEnabled(True)
 
-    def _on_modelos_listados(self, modelos: list[str]):
-        self.actualizar_modelos(modelos)
-        n = len(modelos)
+    def _on_modelos_listados(self, modelos: list):
+        nombres = [m["name"] if isinstance(m, dict) else m for m in modelos]
+        self.actualizar_modelos(nombres)
+        n = len(nombres)
         self.lbl_test.setText(f"✅  Ollama OK — {n} modelo(s) disponible(s)")
         self._btn_test.setEnabled(True)
 
