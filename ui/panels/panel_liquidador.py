@@ -24,6 +24,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
 from db.connection import conn_ctx
+from config.settings import cargar as _cfg_load
 
 # ── Paleta Catppuccin Mocha ──────────────────────────────────
 _BG       = "#24273a"
@@ -962,8 +963,7 @@ class DialogExportLSD(QDialog):
             QMessageBox.critical(self, "Error al construir TXT", str(e)); return
 
         default_name = f"LSD_{periodo}_SJ_{nro_liq:05d}_{nomina['cuil']}.txt"
-        from config.settings import cargar as cfg_load
-        cfg = cfg_load()
+        cfg = _cfg_load()
         default_dir = cfg.get("ruta_base", str(Path.home()))
         path, _ = QFileDialog.getSaveFileName(
             self, "Guardar TXT — Libro de Sueldos Digital",

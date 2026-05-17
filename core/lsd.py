@@ -1,8 +1,10 @@
 """
-core/lsd.py — Funciones de base de datos para el Libro de Sueldos Digital
-          Constantes y helpers de lectura/escritura, sin lógica de UI.
+core/lsd.py — Constantes del Libro de Sueldos Digital (PARAMETROS_DEFAULT, etc.)
+ATENCIÓN: las funciones leer_* de este módulo NO se usan en el proyecto.
+La lógica activa vive en ui/panels/panel_liquidador.py con conn_ctx.
+No llamar a estas funciones sin migrarlas primero a conn_ctx.
 """
-from db.connection import get_conn
+from db.connection import conn_ctx
 
 TIPO_EMP_OPTS = [
     ("1", "Decreto 814/01 Art.2 Inc.B (Comercio)"),
@@ -41,25 +43,19 @@ PARAMETROS_DEFAULT = [
 
 
 def init_lsd_db() -> None:
-    """Inserta fila empleador vacía y parámetros por defecto si no existen."""
-    with get_conn() as conn:
+    with conn_ctx() as conn:
         conn.execute("INSERT OR IGNORE INTO empleador_lsd (id) VALUES (1)")
         if conn.execute("SELECT COUNT(*) FROM parametros_arca").fetchone()[0] == 0:
             conn.executemany(
                 "INSERT INTO parametros_arca VALUES (?,?,?,?,?)",
                 PARAMETROS_DEFAULT
             )
-        conn.commit()
 
 
 def leer_empleador() -> dict:
-    with get_conn() as conn:
+    with conn_ctx() as conn:
         row = conn.execute("SELECT * FROM empleador_lsd WHERE id=1").fetchone()
-    if not row:
-        return {}
-    keys = ["id", "cuit", "razon_social", "tipo_empresa", "cod_actividad",
-            "cod_modalidad", "cod_localidad", "ident_envio"]
-    return dict(zip(keys, tuple(row)))
+    return dict(row) if row else {}
 
 
 def leer_nomina(solo_activos: bool = True) -> list[dict]:
@@ -67,51 +63,41 @@ def leer_nomina(solo_activos: bool = True) -> list[dict]:
     if solo_activos:
         q += " WHERE activo=1"
     q += " ORDER BY apellido_nombre"
-    keys = ["id", "cuil", "apellido_nombre", "legajo", "fecha_ingreso",
-            "cbu", "forma_pago", "cod_obra_social", "cod_situacion",
-            "cod_condicion", "cod_siniestrado", "scvo", "cct",
-            "reduccion", "activo"]
-    with get_conn() as conn:
+    with conn_ctx() as conn:
         rows = conn.execute(q).fetchall()
-    return [dict(zip(keys, tuple(r))) for r in rows]
+    return [dict(r) for r in rows]
 
 
 def leer_empleado_por_cuil(cuil: str) -> dict | None:
-    keys = ["id", "cuil", "apellido_nombre", "legajo", "fecha_ingreso",
-            "cbu", "forma_pago", "cod_obra_social", "cod_situacion",
-            "cod_condicion", "cod_siniestrado", "scvo", "cct",
-            "reduccion", "activo"]
-    with get_conn() as conn:
+    with conn_ctx() as conn:
         row = conn.execute(
             "SELECT * FROM nomina_lsd WHERE cuil=?", (cuil,)
         ).fetchone()
-    return dict(zip(keys, tuple(row))) if row else None
+    return dict(row) if row else None
 
 
 def leer_parametros() -> list[dict]:
-    keys = ["cod_empleador", "descripcion", "cod_arca", "tipo", "debcred"]
-    with get_conn() as conn:
+    with conn_ctx() as conn:
         rows = conn.execute(
             "SELECT * FROM parametros_arca ORDER BY tipo, cod_empleador"
         ).fetchall()
-    return [dict(zip(keys, tuple(r))) for r in rows]
+    return [dict(r) for r in rows]
 
 
 def leer_tope(periodo: str) -> float | None:
-    with get_conn() as conn:
+    with conn_ctx() as conn:
         row = conn.execute(
             "SELECT tope FROM tope_anses WHERE periodo=?", (periodo,)
         ).fetchone()
-    return float(row[0]) if row else None
+    return float(row["tope"]) if row else None
 
 
 def guardar_historial(cuil: str, periodo: str, nro_liq: int,
                       path_txt: str, fecha: str) -> None:
-    with get_conn() as conn:
+    with conn_ctx() as conn:
         conn.execute(
             "INSERT INTO historial_lsd "
             "(cuil, periodo, nro_liquidacion, path_txt, fecha_generacion) "
             "VALUES (?,?,?,?,?)",
             (cuil, periodo, nro_liq, path_txt, fecha)
         )
-        conn.commit()
