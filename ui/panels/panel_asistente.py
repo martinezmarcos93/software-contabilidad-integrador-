@@ -367,7 +367,8 @@ class WorkerListarModelos(QThread):
                 urllib.request.Request(self._url), timeout=5
             ) as r:
                 data = json.loads(r.read())
-            self.resultado.emit(data.get("models", []))
+            models = [m["name"] for m in data.get("models", [])]
+            self.resultado.emit(models)
         except Exception as e:
             self.error.emit(_fmt_error(e))
 
